@@ -85,7 +85,11 @@ async function runQuery(q,label){
   DATA=j;
   render(j,label,q);
   $("#resultArea").classList.remove("hidden");
-  setStatus(`조회 완료 · 표제부 ${j.titles.length}건 / 층별 ${j.floors.length}건 / 호별 ${j.units.length}건`,"ok");
+  if(j.errors && j.errors.length){
+    setStatus(`일부 조회 완료 · 표제부 ${j.titles.length}건 / 층별 ${j.floors.length}건 / 호별 ${j.units.length}건 · ${j.errors.join(" | ")}`,"error");
+  }else{
+    setStatus(`조회 완료 · 표제부 ${j.titles.length}건 / 층별 ${j.floors.length}건 / 호별 ${j.units.length}건`,"ok");
+  }
  }catch(e){
   setStatus(e.message,"error");
   throw e;
