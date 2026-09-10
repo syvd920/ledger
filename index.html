@@ -1,91 +1,23 @@
 <!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>건축물대장 조회</title>
-  <link rel="stylesheet" href="./styles.css">
-</head>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>건축물대장 조회</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="./styles.css"></head>
 <body>
-<header class="site-header">
-  <div class="header-inner">
-    <div class="brand-block">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h1>건축물대장 조회</h1>
-    </div>
-    <div id="apiState" class="api-state"><span></span>연결 확인 중</div>
-  </div>
-</header>
-
-<main class="page">
-  <section class="search-panel">
-    <div class="search-row">
-      <input id="address" type="text" autocomplete="off"
-             placeholder="지번 또는 도로명 주소를 입력하세요"
-             aria-label="주소 입력">
-      <button id="searchAddress" class="search-button">
-        <span class="button-label">조회</span>
-        <span class="spinner" aria-hidden="true"></span>
-      </button>
-    </div>
-    <div id="status" class="status"></div>
-  </section>
-
-  <section id="resultArea" class="hidden result-area">
-    <section class="address-box">
-      <div class="address-main">
-        <span class="label">조회 주소</span>
-        <strong id="resolvedAddress">-</strong>
-      </div>
-      <div class="code-row" id="queryCodes"></div>
-    </section>
-
-    <div class="summary-grid" id="summaryCards"></div>
-
-    <section class="content-card">
-      <div class="section-head">
-        <div>
-          <h2>건물 기본정보</h2>
-          <p id="buildingTitle"></p>
-        </div>
-      </div>
-      <div id="basicInfo" class="info-grid"></div>
-    </section>
-
-    <section class="content-card">
-      <div class="section-head">
-        <h2>표제부 · 동 정보</h2>
-        <button class="outline-button" data-csv="titles">CSV 저장</button>
-      </div>
-      <div class="table-wrap"><table id="titlesTable"></table></div>
-    </section>
-
-    <section class="content-card">
-      <div class="section-head">
-        <h2>층별 정보</h2>
-        <div class="actions">
-          <input id="floorFilter" class="filter-input" placeholder="층 또는 용도 검색">
-          <button class="outline-button" data-csv="floors">CSV 저장</button>
-        </div>
-      </div>
-      <div class="table-wrap"><table id="floorsTable"></table></div>
-    </section>
-
-    <section class="content-card" id="unitsSection">
-      <div class="section-head">
-        <h2>동 · 호별 면적</h2>
-        <div class="actions">
-          <input id="unitFilter" class="filter-input" placeholder="동 또는 호 검색">
-          <button class="outline-button" data-csv="units">CSV 저장</button>
-        </div>
-      </div>
-      <div class="table-wrap"><table id="unitsTable"></table></div>
-      <p id="unitNotice" class="notice"></p>
-    </section>
-  </section>
+<header><div class="header-inner"><h1>건축물대장 조회</h1><span id="apiState" class="connection">연결 확인 중</span></div></header>
+<main>
+<section class="search-panel"><form id="searchForm"><label for="address">지번주소</label><div class="search-row"><input id="address" autocomplete="street-address" placeholder="예: 서울특별시 강남구 역삼동 123-4" required><button id="searchAddress" type="submit" class="primary">조회하기 <span aria-hidden="true">↗</span></button></div></form><div id="status" role="status" aria-live="polite"></div></section>
+<div id="emptyState" class="empty"><span class="eyebrow">건축물 정보</span><h2>주소로 건축물대장을 확인하세요</h2><p>건물 기본정보부터 동·호별 면적까지 한곳에서 확인할 수 있습니다.</p><div class="empty-columns"><span>01 &nbsp; 건물 개요</span><span>02 &nbsp; 동·호별 면적</span><span>03 &nbsp; 층별 정보</span></div></div>
+<section id="resultArea" hidden>
+<div class="address-box"><span class="eyebrow">조회 결과</span><h2 id="buildingTitle"></h2><p id="resolvedAddress"></p><div id="queryCodes" class="codes"></div></div>
+<div id="warnings" class="warning" hidden></div><div id="summaryCards" class="metrics"></div>
+<nav class="tabs" aria-label="결과 보기"><button type="button" data-tab="units" aria-current="page">동·호별 면적</button><button type="button" data-tab="basic">건물 기본정보</button><button type="button" data-tab="floors">층별 정보</button></nav>
+<section id="panel-units" class="panel">
+<div class="section-head"><div><span class="eyebrow">동 · 호 선택</span><h2>확인할 호수를 선택하세요</h2></div><button data-csv="units" class="secondary">호별 CSV 저장</button></div>
+<div class="unit-layout"><aside><div class="step-label"><b>1</b><label for="dongSelect">동 선택</label></div><select id="dongSelect"></select><div id="dongList" class="dong-list"></div></aside><div class="unit-main"><div class="step-label"><b>2</b><label for="unitFilter">호 선택</label><span id="unitCount" class="muted"></span></div><input id="unitFilter" class="filter" placeholder="호수 검색" type="search"><div id="unitList" class="unit-list"></div><div id="unitPager" class="pager"></div></div></div>
+<div id="unitDetail" class="unit-detail" aria-live="polite"><div class="empty-detail">동을 선택한 뒤 호수를 누르면 면적 상세가 표시됩니다.</div></div>
+<p id="unitNotice" class="notice"></p><details id="allUnits"><summary>전체 호 목록 보기</summary><div class="table-wrap"><table id="unitsTable"></table></div><div id="allPager" class="pager"></div></details>
+</section>
+<section id="panel-basic" class="panel" hidden><div class="section-head"><h2>건물 기본정보</h2><span class="muted">상단 요약은 첫 표제부 기준</span></div><div id="basicInfo" class="info-grid"></div><div class="section-head subhead"><h2>표제부 · 동 정보</h2><button class="secondary" data-csv="titles">CSV 저장</button></div><div class="table-wrap"><table id="titlesTable"></table></div></section>
+<section id="panel-floors" class="panel" hidden><div class="section-head"><h2>층별 정보</h2><button class="secondary" data-csv="floors">CSV 저장</button></div><label for="floorFilter" class="sr-only">동·층·용도 검색</label><input id="floorFilter" class="filter" type="search" placeholder="동·층·용도 검색"><div class="table-wrap"><table id="floorsTable"></table></div><div id="floorPager" class="pager"></div></section>
+</section>
 </main>
-
-<script src="./config.js"></script>
-<script src="./app.js"></script>
-</body>
-</html>
+<dialog id="loadingDialog" aria-labelledby="loadingTitle"><div class="loading-head"><span class="spinner" aria-hidden="true"></span><span class="eyebrow">건축물대장 조회</span></div><h2 id="loadingTitle">주소를 확인하고 있습니다</h2><p id="loadingText">제공기관 응답을 기다리고 있습니다.</p><ol id="progressSteps"><li>주소 확인</li><li>건물 기본정보 조회</li><li>층별정보 조회</li><li>호별정보 정리</li></ol><div class="loading-footer"><span id="elapsed">0초 경과</span><button id="cancelSearch" class="secondary" type="button">조회 중단</button></div></dialog>
+<script src="./config.js"></script><script src="./app.js"></script></body></html>
