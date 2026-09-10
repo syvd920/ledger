@@ -1,0 +1,7 @@
+name = "building-ledger-proxy"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# API 키는 여기에 쓰지 마세요.
+# 터미널에서:
+# npx wrangler secret put DATA_GO_KR_SERVICE_KEY
