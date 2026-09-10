@@ -9,7 +9,10 @@
 <body>
 <header class="site-header">
   <div class="header-inner">
-    <h1>건축물대장 조회</h1>
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <h1>건축물대장 조회</h1>
+    </div>
     <div id="apiState" class="api-state"><span></span>연결 확인 중</div>
   </div>
 </header>
@@ -20,12 +23,15 @@
       <input id="address" type="text" autocomplete="off"
              placeholder="지번 또는 도로명 주소를 입력하세요"
              aria-label="주소 입력">
-      <button id="searchAddress" class="search-button">조회</button>
+      <button id="searchAddress" class="search-button">
+        <span class="button-label">조회</span>
+        <span class="spinner" aria-hidden="true"></span>
+      </button>
     </div>
     <div id="status" class="status"></div>
   </section>
 
-  <section id="resultArea" class="hidden">
+  <section id="resultArea" class="hidden result-area">
     <section class="address-box">
       <div class="address-main">
         <span class="label">조회 주소</span>

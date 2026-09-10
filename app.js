@@ -60,6 +60,7 @@ async function searchAddress(){
  setStatus("조회 중입니다.");
  const btn=$("#searchAddress");
  btn.disabled=true;
+ btn.classList.add("loading");
 
  try{
    const j=await api("/api/address-search",{method:"POST",body:JSON.stringify({address})});
@@ -68,6 +69,7 @@ async function searchAddress(){
    setStatus(e.message,"error");
  }finally{
    btn.disabled=false;
+   btn.classList.remove("loading");
  }
 }
 $("#searchAddress").onclick=searchAddress;
