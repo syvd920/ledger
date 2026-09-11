@@ -9,8 +9,14 @@ const PAGE=48;
 function status(message,type=''){$('#status').textContent=message;$('#status').className=type;}
 async function api(path,body,signal){
  const base=(CFG.WORKER_URL||'').replace(/\/$/,'');if(!base)throw new Error('config.js의 Worker 주소를 확인해 주세요.');
- const r=await fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),signal});
- const j=await r.json().catch(()=>({error:'서버 응답을 해석할 수 없습니다.'}));if(!r.ok||j.error)throw new Error(j.error||`HTTP ${r.status}`);return j;
+ const local=new AbortController();const cancel=()=>local.abort();signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)local.abort();
+ const timeout=setTimeout(()=>local.abort(),50000);
+ try{
+  const r=await fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),signal:local.signal});
+  const j=await r.json().catch(()=>({error:`Worker HTTP ${r.status} · 응답을 읽을 수 없습니다. 배포 상태 또는 Worker 오류를 확인하세요.`}));
+  if(!r.ok||j.error)throw new Error(j.error||`HTTP ${r.status}`);return j;
+ }catch(e){if(local.signal.aborted&&!signal?.aborted)throw new Error('Worker 응답 시간 초과 · 수신한 페이지는 보존됩니다.');throw e;}
+ finally{clearTimeout(timeout);signal?.removeEventListener('abort',cancel);}
 }
 api('/api/health').then(j=>{$('#apiState').textContent=j.keyConfigured?'연결됨':'인증키 미설정';$('#apiState').classList.toggle('ok',j.keyConfigured);}).catch(()=>{$('#apiState').textContent='연결 확인 필요';});
 let failedSteps=new Set();
@@ -19,30 +25,70 @@ function progress(n){$('#loadingTitle').textContent=stepNames[n];$('#loadingText
 function reset(){DATA={recap:[],titles:[],floors:[],units:[],errors:[]};selectedDong='';selectedUnit='';unitPage=allPage=floorPage=0;$('#unitFilter').value='';$('#floorFilter').value='';$('#allUnits').open=false;$('#resultArea').hidden=true;$('#emptyState').hidden=true;tab('units');}
 function stop(){controller?.abort();}
 $('#cancelSearch').onclick=stop;$('#loadingDialog').addEventListener('cancel',e=>{e.preventDefault();stop();});
-$('#searchForm').addEventListener('submit',async e=>{
- e.preventDefault();if(busy)return;const address=$('#address').value.trim();if(!address)return;
- busy=true;failedSteps.clear();reset();controller=new AbortController();$('#searchAddress').disabled=true;$('#address').disabled=true;progress(0);$('#loadingDialog').showModal();
+let RESOLVED=null,SOURCES={};
+const SOURCE_LIST=[['titles','표제부',1],['recap','총괄표제부',1],['floors','층별정보',2],['expos','전유부',3],['areas','전유공용면적',3]];
+function waitPage(signal){return new Promise((resolve,reject)=>{const done=()=>{signal.removeEventListener('abort',cancel);resolve();};const cancel=()=>{clearTimeout(t);reject(new Error('조회 중단'));};const t=setTimeout(done,250);signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)cancel();});}
+function syncSources(){
+ DATA.errors=SOURCE_LIST.flatMap(([id,label])=>SOURCES[id]?.error?[SOURCES[id].error]:[]);
+ DATA.sourceStatus=Object.fromEntries(SOURCE_LIST.map(([id])=>[id,{complete:SOURCES[id]?.complete||false,count:SOURCES[id]?.items.length||0}]));
+ for(const id of ['titles','recap','floors'])DATA[id]=SOURCES[id]?.items||[];
+ const result=buildUnits(SOURCES.expos?.items||[],SOURCES.areas?.items||[],{exposComplete:!!SOURCES.expos?.complete,areasComplete:!!SOURCES.areas?.complete});
+ DATA.units=result.units;DATA.matchDiagnostics=result.diagnostics;
+ if(RESOLVED)render(RESOLVED);
+}
+async function loadPages(id,label,step){
+ const state=SOURCES[id];if(state.complete)return;state.error=null;
+ progress(step);
+ while(!state.complete){
+  if(controller.signal.aborted)throw new Error('조회 중단');
+  if(state.next>100){state.error=`${label} · 최대 50,000건 조회 한도에 도달했습니다. 받은 자료만 표시합니다.`;state.capped=true;break;}
+  $('#loadingText').textContent=`${label} ${state.next}페이지 조회 중 · ${state.items.length.toLocaleString('ko-KR')}건 수신${state.total!==null?` / 총 ${state.total.toLocaleString('ko-KR')}건`:''}`;
+  let j;
+  try{j=await api('/api/building-page',{...RESOLVED.query,source:id,page:state.next},controller.signal);}
+  catch(e){if(controller.signal.aborted)throw e;state.error=`${label} ${state.next}페이지 · ${e.message}`;break;}
+  if(!j.ok){state.error=j.message||`${label} ${state.next}페이지 조회 실패`;break;}
+  if(j.source!==id||j.page!==state.next||!Array.isArray(j.items)||typeof j.complete!=='boolean'||(!j.complete&&j.nextPage!==state.next+1)){state.error=`${label} · 페이지 응답 형식이 예상과 다릅니다. Worker 버전을 확인하세요.`;break;}
+  if(state.total!==null&&j.totalCount!==state.total){state.error=`${label} · 조회 중 전체 건수가 변경되었습니다. 새 조회로 다시 확인해 주세요.`;break;}
+  // Commit a page only after a successful, validated response. Resume never
+  // appends an already committed page, preventing duplicate area sums.
+  const fingerprint=JSON.stringify(j.items);
+  if(state.next>1&&j.items.length&&fingerprint===state.lastPage){state.error=`${label} · 같은 페이지 자료가 반복 반환되어 중복 합산을 막았습니다. 새 조회로 확인해 주세요.`;break;}
+  state.lastPage=fingerprint;state.items.push(...j.items);state.total=j.totalCount;state.next=j.nextPage;state.complete=j.complete;
+  if(!state.complete)await waitPage(controller.signal);
+ }
+ if(state.error){failedSteps.add(step);$('#loadingFailures').textContent=SOURCE_LIST.map(([key])=>SOURCES[key]?.error).filter(Boolean).join('\n');}
+ syncSources();
+}
+async function runSearch(resume=false){
+ if(busy)return;const address=$('#address').value.trim();if(!resume&&!address)return;
+ busy=true;failedSteps.clear();
+ if(!resume){reset();RESOLVED=null;SOURCES=Object.fromEntries(SOURCE_LIST.map(([id])=>[id,{items:[],next:1,total:null,complete:false,error:null}]));}
+ selectedUnit='';controller=new AbortController();$('#searchAddress').disabled=true;$('#address').disabled=true;$('#resumeSearch').hidden=true;$('#loadingFailures').textContent='';progress(0);$('#loadingDialog').showModal();
  const start=Date.now();$('#elapsed').textContent='0초 경과';timer=setInterval(()=>{$('#elapsed').textContent=`${Math.floor((Date.now()-start)/1000)}초 경과`;},1000);
- status('조회 중입니다.');let resolved=null;
+ status(resume?'수신한 자료를 유지하고 미완료 페이지부터 조회합니다.':'조회 중입니다.');
  try{
-  resolved=await api('/api/address-search',{address},controller.signal);
-  for(const [i,stage] of ['basic','floors','units'].entries()){
-   progress(i+1);
-   try{
-    const j=await api('/api/building',{...resolved.query,stage},controller.signal);
-    if(stage==='basic'&&Array.isArray(j.units))throw new Error('Worker를 먼저 새 버전으로 교체해 주세요. 현재 Worker는 단계별 조회를 지원하지 않습니다.');
-    if(j.errors?.length)failedSteps.add(i+1);
-    const priorErrors=DATA.errors;DATA={...DATA,...j,sourceStatus:{...DATA.sourceStatus,...j.sourceStatus},errors:[...priorErrors,...(j.errors||[])]};
-    render(resolved);
-   }catch(err){if(controller.signal.aborted)throw err;failedSteps.add(i+1);DATA.errors.push(`${['건물 기본정보','층별정보','호별정보'][i]} · ${err.message}`);if(err.message.includes('Worker를 먼저'))break;}
-  }
-  render(resolved);const count=DATA.titles.length+DATA.floors.length+DATA.units.length;
-  status(count?`${DATA.errors.length?'일부 조회 완료':'조회 완료'} · 표제부 ${DATA.titles.length}건 · 층별 ${DATA.floors.length}건 · 호별 ${DATA.units.length}건`:DATA.errors.length?'조회하지 못했습니다. 아래 실패 원인을 확인해 주세요.':'해당 지번에서 조회된 건축물대장이 없습니다.',DATA.errors.length?'error':'');
- }catch(err){
-  const aborted=controller.signal.aborted;status(aborted?'조회가 중단되었습니다. 이미 수신한 자료는 아래에 남아 있습니다.':err.message,'error');
-  if(resolved){DATA.errors.push(aborted?'사용자가 조회를 중단했습니다. 미수신 항목은 확인할 수 없습니다.':err.message);render(resolved);}else $('#emptyState').hidden=false;
- }finally{clearInterval(timer);$('#loadingDialog').close();busy=false;$('#searchAddress').disabled=false;$('#address').disabled=false;controller=null;}
-});
+  const health=await api('/api/health',null,controller.signal);
+  if(!health.paged)throw new Error('Cloudflare Worker를 먼저 3.0 버전으로 교체하고 Deploy해 주세요.');
+  if(!RESOLVED)RESOLVED=await api('/api/address-search',{address},controller.signal);
+  for(const [id,label,step] of SOURCE_LIST)if(!SOURCES[id].capped)await loadPages(id,label,step);
+  syncSources();
+  const incomplete=SOURCE_LIST.some(([id])=>!SOURCES[id].complete);
+  status(`${incomplete?'일부 조회 완료':'조회 완료'} · 표제부 ${DATA.titles.length}건 · 층별 ${DATA.floors.length}건 · 호별 ${DATA.units.length}건${incomplete?' · 미완료 항목은 이어서 조회할 수 있습니다.':''}`,incomplete?'error':'');
+ }catch(e){
+  const aborted=controller.signal.aborted;
+  if(RESOLVED){
+   for(const [id,label] of SOURCE_LIST)if(!SOURCES[id].complete&&!SOURCES[id].error)SOURCES[id].error=`${label} · ${aborted?'조회 중단 · 받은 자료 보존':e.message}`;
+   syncSources();
+  }else $('#emptyState').hidden=false;
+  status(aborted?'조회 중단 · 받은 자료는 보존했습니다. 이어서 조회할 수 있습니다.':e.message,'error');
+ }finally{
+  clearInterval(timer);$('#loadingDialog').close();busy=false;$('#searchAddress').disabled=false;$('#address').disabled=false;controller=null;
+  $('#resumeSearch').hidden=!RESOLVED||!SOURCE_LIST.some(([id])=>!SOURCES[id].complete&&!SOURCES[id].capped);
+ }
+}
+$('#searchForm').addEventListener('submit',e=>{e.preventDefault();return runSearch(false);});
+$('#resumeSearch').onclick=()=>runSearch(true);
+
 function tab(id){document.querySelectorAll('[data-tab]').forEach(b=>{if(b.dataset.tab===id)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});for(const name of ['units','basic','floors'])$(`#panel-${name}`).hidden=name!==id;}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 function table(selector,cols,rows){$(selector).innerHTML=`<thead><tr>${cols.map(([name])=>`<th scope="col">${esc(name)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(r=>`<tr>${cols.map(([,key])=>`<td>${esc(typeof key==='function'?key(r):(r[key]??'—'))}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${cols.length}">표시할 자료가 없습니다.</td></tr>`}</tbody>`;}
@@ -88,3 +134,77 @@ document.querySelectorAll('[data-csv]').forEach(b=>b.onclick=()=>{
  const cell=v=>{let s=String(v??'');if(/^[\s]*[=+@-]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};
  const csv='\ufeff'+[cols.join(','),...rows.map(r=>cols.map(c=>cell(r[c])).join(','))].join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=`building-${key}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 });
+
+// Shared matching logic, identical to Worker.
+function norm(v,suffix=""){
+ let s=String(v??"").normalize("NFKC").trim().replace(/\s+/g,"").toUpperCase();
+ if(suffix)s=s.replace(new RegExp(suffix+"$"),"");
+ return s.replace(/\d+/g,x=>String(Number(x)));
+}
+function identity(r){return {pk:String(r.mgmBldrgstPk||"").trim(),dong:norm(r.dongNm,"동"),ho:norm(r.hoNm,"호"),floor:norm(r.flrNoNm||r.flrNo,"층")};}
+function sameUnit(a,b){return !(a.dong&&b.dong&&a.dong!==b.dong)&&!(a.ho&&b.ho&&a.ho!==b.ho);}
+function areaValue(v){if(v===null||v===undefined||String(v).trim()==="")return null;const n=Number(String(v).replace(/,/g,""));return Number.isFinite(n)&&n>0?n:null;}
+function commonType(r){
+ const t=[r.etcPurps,r.mainPurpsCdNm].filter(Boolean).join(" ");
+ if(/주차|기계|전기|관리|경비|창고|펌프|발전|저수|정화|쓰레기|커뮤니티|부대|복리/.test(t))return "otherCommonArea";
+ if(/계단|복도|승강기|엘리베이터|현관|홀|주거공용/.test(t))return "residentialCommonArea";
+ return "unclassifiedCommonArea";
+}
+function round(v){return Math.round(v*10000)/10000;}
+function buildUnits(expos,areas,{exposComplete=true,areasComplete=true}={}){
+ const units=[],pkIndex=new Map(),pairIndex=new Map(),orphanIndex=new Map();
+ const diagnostics={matchedByPk:0,matchedByIdentity:0,unmatched:0,ambiguous:0,zeroOrMissing:0,areaOnlyUnits:0};
+ const addIndex=(map,k,u)=>{if(!k)return;if(!map.has(k))map.set(k,[]);if(!map.get(k).includes(u))map.get(k).push(u);};
+ function create(r,source){
+  const id=identity(r),u={dongNm:r.dongNm||"동 미기재",hoNm:r.hoNm||"호 미기재",flrNoNm:r.flrNoNm||r.flrNo||"",purpose:r.etcPurps||r.mainPurpsCdNm||"",_pk:`unit-${units.length+1}`,registerId:id.pk,source,identity:id,rows:[],matches:[],warnings:[],exclusiveArea:null,residentialCommonArea:null,otherCommonArea:null,unclassifiedCommonArea:null,supplyArea:null,contractArea:null};
+  units.push(u);if(source==="expos"){addIndex(pkIndex,id.pk,u);if(id.dong&&id.ho)addIndex(pairIndex,`${id.dong}|${id.ho}`,u);}return u;
+ }
+ for(const r of expos){
+  const id=identity(r);let existing=(pkIndex.get(id.pk)||[]).filter(u=>sameUnit(id,u.identity));
+  if(!id.pk)existing=(pairIndex.get(`${id.dong}|${id.ho}`)||[]).filter(u=>id.floor&&u.identity.floor===id.floor&&!u.identity.pk);
+  if(existing.length!==1)create(r,"expos");
+ }
+ for(const r of areas){
+  const id=identity(r);let candidates=(pkIndex.get(id.pk)||[]).filter(u=>sameUnit(id,u.identity)),method="관리번호";
+  if(candidates.length!==1){
+   candidates=id.dong&&id.ho?(pairIndex.get(`${id.dong}|${id.ho}`)||[]):[];method="동·호";
+   const isExclusive=String(r.exposPubuseGbCdNm||"").includes("전유");
+   if(candidates.length>1&&isExclusive&&id.floor)candidates=candidates.filter(u=>u.identity.floor===id.floor);
+  }
+  let u;
+  if(candidates.length===1){u=candidates[0];diagnostics[method==="관리번호"?"matchedByPk":"matchedByIdentity"]++;}
+  else {
+   const state=candidates.length>1?"ambiguous":"unmatched";diagnostics[state]++;
+   // Never silently attach a row to one of several possible units.
+   const orphanKey=JSON.stringify([state,id.pk,id.dong,id.ho]);u=orphanIndex.get(orphanKey);
+   if(!u){u=create(r,state);orphanIndex.set(orphanKey,u);diagnostics.areaOnlyUnits++;u.warnings.push(state==="ambiguous"?"전유부 연결 후보가 여러 개입니다. 면적 원본만 표시합니다.":"전유부와 연결되지 않은 면적 원본입니다.");}
+   method="면적 원본";
+  }
+  u.rows.push(r);if(!u.matches.includes(method))u.matches.push(method);
+ }
+ for(const u of units){
+  const sums={},invalid=new Set();
+  for(const r of u.rows){
+   const g=String(r.exposPubuseGbCdNm||"");
+   const field=g.includes("전유")?"exclusiveArea":g.includes("공용")?commonType(r):null;
+   if(!field){u.warnings.push("전유·공용 구분 미기재 자료가 있어 합계를 계산하지 않았습니다.");invalid.add("unknown");continue;}
+   const a=areaValue(r.area);
+   if(a===null){invalid.add(field);diagnostics.zeroOrMissing++;continue;}
+   sums[field]=(sums[field]||0)+a;
+  }
+  for(const field of ["exclusiveArea","residentialCommonArea","otherCommonArea","unclassifiedCommonArea"]){
+   if(sums[field]!=null&&!invalid.has(field)&&areasComplete&&!invalid.has("unknown"))u[field]=round(sums[field]);
+  }
+  if(invalid.size)u.warnings.push("원본 면적이 0·빈 값·유효하지 않은 값이거나 구분이 없습니다. 해당 합계는 자료없음으로 표시합니다.");
+  if(!areasComplete)u.warnings.push("전유공용면적 조회가 불완전하여 면적 합계를 확정할 수 없습니다.");
+  if(!exposComplete)u.warnings.push("전유부 조회가 불완전합니다.");
+  if(!u.rows.length)u.warnings.push(areasComplete?"연결된 면적 자료가 없습니다. 원본 부재 또는 식별정보 불일치 가능성이 있습니다.":"면적 API 조회 실패 또는 일부 수신으로 확인할 수 없습니다.");
+  if(sums.unclassifiedCommonArea!=null||invalid.has("unclassifiedCommonArea"))u.warnings.push("용도로 구분할 수 없는 공용면적이 있습니다. 공급·계약면적은 계산하지 않습니다.");
+  if(u.exclusiveArea!==null&&u.residentialCommonArea!==null&&!sums.unclassifiedCommonArea&&!invalid.has("unclassifiedCommonArea"))u.supplyArea=round(u.exclusiveArea+u.residentialCommonArea);
+  if(u.supplyArea!==null&&u.otherCommonArea!==null)u.contractArea=round(u.supplyArea+u.otherCommonArea);
+  u.areaStatus=!areasComplete?"조회 불완전":u.source!=="expos"?"매칭 확인 필요":!u.rows.length?"연결 자료 없음":invalid.size?"원본 면적 확인 필요":"면적 원본 연결";
+  u.warnings=[...new Set(u.warnings)];delete u.identity;
+ }
+ units.sort((a,b)=>a.dongNm.localeCompare(b.dongNm,"ko",{numeric:true})||a.hoNm.localeCompare(b.hoNm,"ko",{numeric:true}));
+ return {units,diagnostics};
+}
