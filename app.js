@@ -41,10 +41,10 @@ async function loadPages(id,label,step){
  progress(step);
  while(!state.complete){
   if(controller.signal.aborted)throw new Error('조회 중단');
-  if(state.next>100){state.error=`${label} · 최대 50,000건 조회 한도에 도달했습니다. 받은 자료만 표시합니다.`;state.capped=true;break;}
+  if(state.next>(state.pageLimit||1000)){state.error=`${label} · 안전 조회 한도(최대 50,000건 또는 1,000페이지)에 도달했습니다. 받은 자료만 표시합니다.`;state.capped=true;break;}
   $('#loadingText').textContent=`${label} ${state.next}페이지 조회 중 · ${state.items.length.toLocaleString('ko-KR')}건 수신${state.total!==null?` / 총 ${state.total.toLocaleString('ko-KR')}건`:''}`;
   let j;
-  try{j=await api('/api/building-page',{...RESOLVED.query,source:id,page:state.next},controller.signal);}
+  try{j=await api('/api/building-page',{...RESOLVED.query,source:id,page:state.next,pageSize:state.pageSize||500},controller.signal);}
   catch(e){if(controller.signal.aborted)throw e;state.error=`${label} ${state.next}페이지 · ${e.message}`;break;}
   if(!j.ok){state.error=j.message||`${label} ${state.next}페이지 조회 실패`;break;}
   if(j.source!==id||j.page!==state.next||!Array.isArray(j.items)||typeof j.complete!=='boolean'||(!j.complete&&j.nextPage!==state.next+1)){state.error=`${label} · 페이지 응답 형식이 예상과 다릅니다. Worker 버전을 확인하세요.`;break;}
@@ -53,6 +53,7 @@ async function loadPages(id,label,step){
   // appends an already committed page, preventing duplicate area sums.
   const fingerprint=JSON.stringify(j.items);
   if(state.next>1&&j.items.length&&fingerprint===state.lastPage){state.error=`${label} · 같은 페이지 자료가 반복 반환되어 중복 합산을 막았습니다. 새 조회로 확인해 주세요.`;break;}
+  if(j.pageSize!=null)state.pageSize=j.pageSize;if(j.pageLimit!=null)state.pageLimit=j.pageLimit;
   state.lastPage=fingerprint;state.items.push(...j.items);state.total=j.totalCount;state.next=j.nextPage;state.complete=j.complete;
   if(!state.complete)await waitPage(controller.signal);
  }
@@ -68,7 +69,7 @@ async function runSearch(resume=false){
  status(resume?'수신한 자료를 유지하고 미완료 페이지부터 조회합니다.':'조회 중입니다.');
  try{
   const health=await api('/api/health',null,controller.signal);
-  if(!health.paged)throw new Error('Cloudflare Worker를 먼저 3.0 버전으로 교체하고 Deploy해 주세요.');
+  if(!health.adaptivePages)throw new Error('Cloudflare Worker를 먼저 3.0.2 버전으로 교체하고 Deploy해 주세요.');
   if(!RESOLVED)RESOLVED=await api('/api/address-search',{address},controller.signal);
   for(const [id,label,step] of SOURCE_LIST)if(!SOURCES[id].capped)await loadPages(id,label,step);
   syncSources();
