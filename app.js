@@ -37,29 +37,51 @@ function syncSources(){
  if(RESOLVED)render(RESOLVED);
 }
 async function loadPages(id,label,step){
- const state=SOURCES[id];if(state.complete)return;state.error=null;
+ const state=SOURCES[id];if(state.complete||state.exhausted||state.capped)return;state.error=null;
  progress(step);
  while(!state.complete){
   if(controller.signal.aborted)throw new Error('조회 중단');
-  if(state.next>(state.pageLimit||1000)){state.error=`${label} · 안전 조회 한도(최대 50,000건 또는 1,000페이지)에 도달했습니다. 받은 자료만 표시합니다.`;state.capped=true;break;}
-  $('#loadingText').textContent=`${label} ${state.next}페이지 조회 중 · ${state.items.length.toLocaleString('ko-KR')}건 수신${state.total!==null?` / 총 ${state.total.toLocaleString('ko-KR')}건`:''}`;
+  if(state.next>1000||state.items.length>=50000){state.error=`${label} · 안전 조회 한도에 도달했습니다. 받은 ${state.items.length}건은 보존했습니다.`;state.capped=true;break;}
+  $('#loadingText').textContent=`${label} ${state.next}페이지 조회 중 · ${state.items.length.toLocaleString('ko-KR')}건 수신${state.total!==null?` / 제공기관 전체 ${state.total.toLocaleString('ko-KR')}건`:''}`;
   let j;
-  try{j=await api('/api/building-page',{...RESOLVED.query,source:id,page:state.next,pageSize:state.pageSize||500},controller.signal);}
+  try{j=await api('/api/building-page',{...RESOLVED.query,source:id,page:state.next,pagination:'count-audit-v1'},controller.signal);}
   catch(e){if(controller.signal.aborted)throw e;state.error=`${label} ${state.next}페이지 · ${e.message}`;break;}
   if(!j.ok){state.error=j.message||`${label} ${state.next}페이지 조회 실패`;break;}
-  if(j.source!==id||j.page!==state.next||!Array.isArray(j.items)||typeof j.complete!=='boolean'||(!j.complete&&j.nextPage!==state.next+1)){state.error=`${label} · 페이지 응답 형식이 예상과 다릅니다. Worker 버전을 확인하세요.`;break;}
-  if(state.total!==null&&j.totalCount!==state.total){state.error=`${label} · 조회 중 전체 건수가 변경되었습니다. 새 조회로 다시 확인해 주세요.`;break;}
-  // Commit a page only after a successful, validated response. Resume never
-  // appends an already committed page, preventing duplicate area sums.
-  const fingerprint=JSON.stringify(j.items);
-  if(state.next>1&&j.items.length&&fingerprint===state.lastPage){state.error=`${label} · 같은 페이지 자료가 반복 반환되어 중복 합산을 막았습니다. 새 조회로 확인해 주세요.`;break;}
-  if(j.pageSize!=null)state.pageSize=j.pageSize;if(j.pageLimit!=null)state.pageLimit=j.pageLimit;
-  state.lastPage=fingerprint;state.items.push(...j.items);state.total=j.totalCount;state.next=j.nextPage;state.complete=j.complete;
-  if(!state.complete)await waitPage(controller.signal);
+  if(j.source!==id||j.page!==state.next||!Array.isArray(j.items)||j.nextPage!==state.next+1){state.error=`${label} · 잘못된 페이지 응답입니다.`;break;}
+  state.trace??=[];
+  state.trace.push({page:j.page,requested:j.requestedPageSize,reported:j.reportedPageSize,received:j.items.length,total:j.totalCount});
+  if(state.trace.length>12)state.trace.shift();
+  if(state.total!==null&&j.totalCount!==null&&j.totalCount!==state.total)state.changed=true;
+  if(j.totalCount!==null)state.total=j.totalCount;
+  const canonical=JSON.stringify(j.items.map(row=>Object.fromEntries(Object.keys(row).sort().map(k=>[k,row[k]]))));
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonical));
+  const fingerprint=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
+  state.fingerprints??=new Set();
+  // Do not discard a short page or change the request size. A repeated full
+  // page is not committed twice; preserve everything received before it.
+  if(j.items.length&&state.fingerprints.has(fingerprint)){
+   state.error=`${label} ${state.next}페이지 · 이미 받은 페이지가 반복되었습니다. 중복 합산 없이 ${state.items.length}건을 보존했습니다.`;state.exhausted=true;break;
+  }
+  if(j.items.length)state.fingerprints.add(fingerprint);
+  state.seenRows??=new Set();
+  const identified=j.items.filter(row=>row.rnum!=null||row.mgmExposPubuseAreaPk).map(row=>JSON.stringify(Object.fromEntries(Object.keys(row).sort().map(k=>[k,row[k]]))));
+  if(identified.some(key=>state.seenRows.has(key)))state.overlap=true;
+  identified.forEach(key=>state.seenRows.add(key));
+  state.items.push(...j.items);state.next=j.nextPage;
+  state.emptyStreak=j.items.length?0:(state.emptyStreak||0)+1;
+  // Only the accumulated count can establish a known-total completion.
+  if(!state.changed&&!state.overlap&&state.total!==null&&state.items.length===state.total){state.complete=true;break;}
+  if(state.emptyStreak>=2){
+   state.exhausted=true;
+   state.error=`${label} · 다음 두 페이지까지 확인했습니다. 수신 ${state.items.length}건 / 제공기관 전체 ${state.total??'미제공'}건${state.changed?' · 조회 중 전체 건수 변경':''}${state.overlap?' · 페이지 사이 동일 식별정보의 중복 자료 발견':''}. 전체 수신을 확인할 수 없어 일부 자료로 표시합니다.`;
+   break;
+  }
+  await waitPage(controller.signal);
  }
  if(state.error){failedSteps.add(step);$('#loadingFailures').textContent=SOURCE_LIST.map(([key])=>SOURCES[key]?.error).filter(Boolean).join('\n');}
  syncSources();
 }
+
 async function runSearch(resume=false){
  if(busy)return;const address=$('#address').value.trim();if(!resume&&!address)return;
  busy=true;failedSteps.clear();
@@ -69,12 +91,13 @@ async function runSearch(resume=false){
  status(resume?'수신한 자료를 유지하고 미완료 페이지부터 조회합니다.':'조회 중입니다.');
  try{
   const health=await api('/api/health',null,controller.signal);
-  if(!health.adaptivePages)throw new Error('Cloudflare Worker를 먼저 3.0.2 버전으로 교체하고 Deploy해 주세요.');
+  if(!health.countAudit)throw new Error('Cloudflare Worker를 먼저 4.0 버전으로 교체하고 Deploy해 주세요.');
   if(!RESOLVED)RESOLVED=await api('/api/address-search',{address},controller.signal);
   for(const [id,label,step] of SOURCE_LIST)if(!SOURCES[id].capped)await loadPages(id,label,step);
   syncSources();
   const incomplete=SOURCE_LIST.some(([id])=>!SOURCES[id].complete);
-  status(`${incomplete?'일부 조회 완료':'조회 완료'} · 표제부 ${DATA.titles.length}건 · 층별 ${DATA.floors.length}건 · 호별 ${DATA.units.length}건${incomplete?' · 미완료 항목은 이어서 조회할 수 있습니다.':''}`,incomplete?'error':'');
+  const resumable=SOURCE_LIST.some(([id])=>!SOURCES[id].complete&&!SOURCES[id].capped&&!SOURCES[id].exhausted);
+  status(`${incomplete?'일부 조회 완료':'조회 완료'} · 표제부 ${DATA.titles.length}건 · 층별 ${DATA.floors.length}건 · 호별 ${DATA.units.length}건${resumable?' · 실패한 요청은 이어서 조회할 수 있습니다.':incomplete?' · 수신 자료와 전체 건수 차이는 상단 안내를 확인하세요.':''}`,incomplete?'error':'');
  }catch(e){
   const aborted=controller.signal.aborted;
   if(RESOLVED){
@@ -84,12 +107,20 @@ async function runSearch(resume=false){
   status(aborted?'조회 중단 · 받은 자료는 보존했습니다. 이어서 조회할 수 있습니다.':e.message,'error');
  }finally{
   clearInterval(timer);$('#loadingDialog').close();busy=false;$('#searchAddress').disabled=false;$('#address').disabled=false;controller=null;
-  $('#resumeSearch').hidden=!RESOLVED||!SOURCE_LIST.some(([id])=>!SOURCES[id].complete&&!SOURCES[id].capped);
+  $('#resumeSearch').hidden=!RESOLVED||!SOURCE_LIST.some(([id])=>!SOURCES[id].complete&&!SOURCES[id].capped&&!SOURCES[id].exhausted);
  }
 }
 $('#searchForm').addEventListener('submit',e=>{e.preventDefault();return runSearch(false);});
 $('#resumeSearch').onclick=()=>runSearch(true);
 
+const diagnosticButton=document.createElement('button');
+diagnosticButton.type='button';diagnosticButton.className='secondary';diagnosticButton.textContent='조회 진단 저장';
+$('#resumeSearch').after(diagnosticButton);
+diagnosticButton.onclick=()=>{
+ if(!RESOLVED){status('주소 조회 후 사용할 수 있습니다.');return;}
+ const report={version:'4.0',address:RESOLVED.resolvedAddress,query:RESOLVED.query,sources:Object.fromEntries(SOURCE_LIST.map(([id])=>{const x=SOURCES[id];return [id,{received:x.items.length,total:x.total,complete:x.complete,nextPage:x.next,error:x.error,trace:x.trace||[]}];}))};
+ const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='building-query-diagnostics.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
 function tab(id){document.querySelectorAll('[data-tab]').forEach(b=>{if(b.dataset.tab===id)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});for(const name of ['units','basic','floors'])$(`#panel-${name}`).hidden=name!==id;}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 function table(selector,cols,rows){$(selector).innerHTML=`<thead><tr>${cols.map(([name])=>`<th scope="col">${esc(name)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(r=>`<tr>${cols.map(([,key])=>`<td>${esc(typeof key==='function'?key(r):(r[key]??'—'))}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${cols.length}">표시할 자료가 없습니다.</td></tr>`}</tbody>`;}
