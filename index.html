@@ -11,4 +11,65 @@
 <section id="panel-units" class="panel" hidden><div class="section-head"><div><span class="eyebrow">02 · UNIT AREA</span><h2>동을 선택하고 호수를 확인하세요</h2></div></div><div class="unit-layout"><aside><label for="dongSelect">1 · 동 선택</label><select id="dongSelect"><option value="">동 선택</option></select><p class="notice">표제부의 동 목록입니다. 다음 표제부 페이지에 다른 동이 있을 수 있습니다.</p><form id="dongForm"><label for="dongInput">목록에 없는 동명</label><input id="dongInput" maxlength="100" placeholder="원문 그대로: 101동"><button class="secondary">동 조회</button></form></aside><div class="unit-main"><form id="unitForm"><label for="hoInput">2 · 호명 직접 입력</label><div class="search-row"><input id="hoInput" maxlength="100" required placeholder="원문 그대로: 1203호"><button class="secondary">해당 호 조회</button></div></form><p id="unitCount" class="notice">동을 선택하면 그 동의 면적 API 한 페이지만 요청합니다.</p><div id="unitList" class="unit-list"></div><div id="unitsPager" class="pager"></div></div></div><div id="unitDetail" class="unit-detail"><div class="empty-detail">호를 선택하면 해당 호의 면적을 별도로 조회합니다.</div></div><div id="detailPager" class="pager"></div><p class="notice">호 목록은 전유공용면적 API에서 받은 현재 페이지의 고유 호입니다. 전유부 전체는 조회하지 않습니다. 면적 API에 자료가 없는 호는 목록에서 빠질 수 있으므로 호명을 직접 입력할 수 있습니다. 동명이 없는 건물은 호명 직접 조회만 지원합니다.</p></section>
 <section id="panel-floors" class="panel" hidden><div class="section-head"><h2>층별 정보</h2><button id="loadFloors" class="secondary">층별정보 조회</button></div><p id="floorsState" class="notice">아직 조회하지 않았습니다. 기본 조회에서는 호출하지 않습니다.</p><div class="table-wrap"><table id="floorsTable"></table></div><div id="floorsPager" class="pager"></div></section>
 <details class="panel diagnostic-panel"><summary>API별 진행 · 진단</summary><p class="notice">실패한 API만 오류로 표시하며, 다른 API에서 받은 자료는 보존합니다. 일시적 서버 오류·시간 초과만 최초 실패 후 1회 재시도합니다. 새 버튼 클릭은 별도 요청입니다.</p><ol id="trace"></ol></details></section>
-<div id="emptyState" hidden></div></main><script src="./config.js"></script><script type="module" src="./app.js"></script></body></html>
+<div id="emptyState" hidden></div></main><script src="./config.js"></script><script id="block-recovery">
+/* v5 road-to-block recovery: explicit one-page lookup, no background scanning. */
+(()=>{
+ const nativeFetch=window.fetch.bind(window),norm=v=>String(v??'').normalize('NFKC').replace(/\s+/g,' ').trim();
+ const road=v=>norm(v).replace(/\s*\([^)]*\)\s*$/,'').trim();
+ let candidates=[],current=null,generation=0,box=null;
+ const clear=()=>{generation++;box?.remove();box=null;current=null;};
+ const sameParcel=(a,b)=>['sigunguCd','bjdongCd','platGbCd','bun','ji'].every(k=>String(a?.[k]??'')===String(b?.[k]??''));
+ function node(tag,value,parent){const el=document.createElement(tag);el.textContent=value;if(parent)parent.append(el);return el;}
+ function show(q,candidate){
+  if(box?.dataset.parcel===JSON.stringify(q))return;
+  box?.remove();box=node('section','');box.className='panel';box.style.marginTop='18px';box.dataset.parcel=JSON.stringify(q);box.setAttribute('aria-live','polite');
+  document.querySelector('.search-panel').after(box);
+  node('h2','일반 지번에 대장이 없습니다. 블록 대장을 확인할 수 있습니다.',box);
+  node('p',`${candidate.label} → ${candidate.jibun||''}\n주소정보의 지번과 건축물대장의 등록 주소가 다를 수 있습니다. 같은 법정동의 블록 표제부를 한 페이지(100행)만 확인합니다.`,box).className='notice';
+  const button=node('button','블록 대장 후보 확인 · 최대 2회 호출',box);button.type='button';button.className='secondary';
+  button.onclick=async()=>{
+   const token=generation;button.disabled=true;const message=node('p','블록 표제부 한 페이지 확인 중…',box);message.className='notice';
+   try{
+    const base=(window.BUILDING_LEDGER_CONFIG?.WORKER_URL||'').replace(/\/$/,'');
+    // Use the wrapped fetch so the existing app can still observe responses normally.
+    const response=await window.fetch(base+'/api/building-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sigunguCd:q.sigunguCd,bjdongCd:q.bjdongCd,platGbCd:'2',source:'titles',page:1})});
+    const j=await response.json();if(token!==generation)return;
+    if(!response.ok||j.error)throw Error(j.error||`Worker HTTP ${response.status}`);
+    if(!Array.isArray(j.items)||j.items.length>100)throw Error('블록 표제부 응답 형식 또는 크기 불일치');
+    const matches=j.items.filter(r=>road(r.newPlatPlc)===road(candidate.label));
+    message.textContent=`현재 ${j.items.length}행 / 전체 ${j.totalCount??'미제공'}행 · 같은 도로명주소 ${matches.length}행. 추가 페이지는 자동 조회하지 않습니다.`;
+    if(!matches.length){node('p','현재 페이지에서 같은 도로명주소를 찾지 못했습니다. 대장 부재로 단정할 수 없으며, 블록·로트 또는 대장 원본 확인이 필요합니다.',box);return;}
+    const groups=new Map();for(const r of matches){const key=JSON.stringify([norm(r.splotNm),norm(r.block),norm(r.lot),String(r.bun??''),String(r.ji??'')]);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(r);}
+    for(const rows of groups.values()){
+     const r=rows[0],block=norm(r.block),lot=norm(r.lot);
+     const select=node('button',`${norm(r.bldNm)||'건물명 미기재'} · ${norm(r.splotNm)} ${block} ${lot} · ${rows.length}개 표제부 → 이 후보로 조회`,box);select.type='button';select.className='candidate';
+     // Existing v5 code form filters block/lot but not road/splot. Only hand over
+     // when this completed, bounded page proves that those filters are unambiguous.
+     const scope=j.items.filter(x=>(!block||norm(x.block)===block)&&(!lot||norm(x.lot)===lot));
+     const safe=block&&j.page===1&&j.hasMore===false&&j.totalCount===j.items.length&&scope.every(x=>road(x.newPlatPlc)===road(candidate.label)&&norm(x.splotNm)===norm(r.splotNm))&&/^\d{1,4}$/.test(String(r.bun))&&/^\d{1,4}$/.test(String(r.ji));
+     if(!safe){select.disabled=true;node('p','이 후보는 블록 범위가 중복되거나 페이지가 불완전하여 자동 연결하지 않습니다. 코드·블록 및 대장 원본을 추가 확인하세요.',box).className='notice';continue;}
+     select.onclick=()=>{
+      if(!document.querySelector('#loading').hidden){message.textContent='진행 중인 조회가 끝난 뒤 선택하세요.';return;}
+      const form=document.querySelector('#codeForm');
+      for(const [k,v]of Object.entries({sigunguCd:q.sigunguCd,bjdongCd:q.bjdongCd,platGbCd:'2',bun:String(r.bun),ji:String(r.ji),block,lot}))form.elements.namedItem(k).value=v;
+      current=null;box.remove();box=null;form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+     };
+    }
+   }catch(e){if(token===generation){message.textContent=e.message;button.disabled=false;}}
+  };
+ }
+ window.fetch=async(input,options)=>{
+  let path='',q=null;try{path=new URL(typeof input==='string'?input:input.url,location.href).pathname;q=typeof options?.body==='string'?JSON.parse(options.body):null;}catch{}
+  if(path==='/api/address-search'){clear();candidates=[];}
+  const token=generation,response=await nativeFetch(input,options);
+  if(token!==generation)return response;
+  if(path==='/api/address-search'&&response.ok){const j=await response.clone().json().catch(()=>null);candidates=j?.candidates||[];}
+  if(path==='/api/building-page'&&q?.source==='titles'&&Number(q.page??1)===1&&String(q.platGbCd)==='0'&&response.ok){
+   const j=await response.clone().json().catch(()=>null),c=candidates.find(c=>sameParcel(c.query,q));
+   if(j?.totalCount===0&&Array.isArray(j.items)&&j.items.length===0&&c?.label){current={q,c};setTimeout(()=>{if(token===generation&&current?.q===q)show(q,c);},0);}
+  }
+  return response;
+ };
+})();
+
+</script><script type="module" src="./app.js"></script></body></html>
